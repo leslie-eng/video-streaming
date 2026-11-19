@@ -6,10 +6,20 @@ from datetime import datetime
 import time
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
+
+save_dir = Path("storage/screenshots")
+save_dir.mkdir(parents=True, exist_ok=True)
+
+rec_dir = Path("storage/recordings")
+rec_dir.mkdir(parents=True, exist_ok=True)
+
+recording = False
+video_writer = None
 
 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -22,7 +32,7 @@ stream = requests.get(url, verify=False, stream=True, timeout=5)
 prev_time = time.perf_counter()
 fps = 0.0
 
-key = cv2.waitKey(1) & 0XFF
+
 
 bytes_data = b""
 for chunk in stream.iter_content(chunk_size=4096):
@@ -63,11 +73,34 @@ for chunk in stream.iter_content(chunk_size=4096):
                 
                 cv2.imshow("Live Camera Feed", resized_frame)
 
-        # Press 'q' to quit
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+                # Press 'q' to quit
+                key = cv2.waitKey(1) & 0XFF
+                
+                if key == ord("r"):
+                    if not recording:
+                        rec_fps = max(1.0, round(fps)) if fps > 0 else 20.0
+                        fourcc = getattr(cv2, "VideoWriter_fourcc")(*"mp4v")
+                        rec_path = rec_dir / f"video_{timestamp}.mp4"
+                        video_writer = cv2.VideoWriter(str(rec_path), fourcc, rec_fps, (og_width, og_height))
+                        recording = True
+                        print(f"Started recording: {rec_path.resolve()}")
+                    else:
+                        recording = False
+                        if video_writer is not None:
+                            video_writer.release()
+                        video_writer = None 
+                        print("Stopped recording.")
+                
+                if key == ord("s"):
+                    filename = f"screenshot_{timestamp}.jpg"
+                    filepath = save_dir / filename
+                    cv2.imwrite(str(filepath), resized_frame)
+                    print(f"Saved: {filepath.resolve()}")
+                    
+                elif key == ord("q"):
+                    break
 
-# cv2.destroyAllWindows()
+cv2.destroyAllWindows()
 
 # stream_url = "https://192.168.100.7:8080/video"
 
