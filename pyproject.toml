@@ -1,0 +1,22 @@
+[project]
+name = "video-stream"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Leslie Angu", email = "73835374+leslie-eng@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "imutils>=0.5.4",
+    "numpy>=2.5.5",
+    "opencv-python>=5.1.0.95",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+video-stream = "video_stream:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
