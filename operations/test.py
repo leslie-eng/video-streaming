@@ -10,12 +10,18 @@ from pathlib import Path
 from ultralytics import YOLO
 from typing import cast
 from ultralytics.engine.results import Results
+import streamlit as st
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
-model = YOLO("yolo11n.pt")
+
+@st.cache_resource
+def load_model():
+    return YOLO("yolo11n.pt")
+
+model = load_model()
 
 save_dir = Path("storage/screenshots")
 save_dir.mkdir(parents=True, exist_ok=True)
@@ -23,104 +29,137 @@ save_dir.mkdir(parents=True, exist_ok=True)
 rec_dir = Path("storage/recordings")
 rec_dir.mkdir(parents=True, exist_ok=True)
 
-recording = False
-video_writer = None
+# Initialize session state for recording & screenshots
+if "recording" not in st.session_state:
+    st.session_state.recording = False
+if "video_writer" not in st.session_state:
+    st.session_state.video_writer = None
+if "take_screenshot" not in st.session_state:
+    st.session_state.take_screenshot = False
 
-timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# Sidebar controls
+st.sidebar.header("Camera & Detection Controls")
 
-url = os.getenv("STREAM_URL")
-if url is None:
-    raise ValueError("STREAM_URL environment variable is not set")
+conf_threshold = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.25, 0.05)
+scale_factor = st.sidebar.slider("Frame Scale", 0.25, 1.0, 0.5, 0.05)
 
-stream = requests.get(url, verify=False, stream=True, timeout=20)
+run_stream = st.sidebar.toggle("Start Camera Feed", value=False)
 
-prev_time = time.perf_counter()
-fps = 0.0
+if st.sidebar.button("Capture Screenshot"):
+    st.session_state.take_screenshot = True
 
+rec_label = "Stop Recording" if st.session_state.recording else "Start Recording"
+if st.sidebar.button(rec_label):
+    st.session_state.recording = not st.session_state.recording
+    if not st.session_state.recording and st.session_state.video_writer is not None:
+        st.session_state.video_writer.release()
+        st.session_state.video_writer = None
+        st.sidebar.success("Recording saved!")
 
+# Placeholders for live video and status messages
+status_placeholder = st.empty()
+frame_placeholder = st.empty()
 
-bytes_data = b""
-for chunk in stream.iter_content(chunk_size=4096):
-    bytes_data += chunk
-    start = bytes_data.find(b"\xff\xd8")  # Start of JPEG frame
-    end = bytes_data.find(b"\xff\xd9")    # End of JPEG frame
+if run_stream:
+    try:
+        stream_url = os.getenv("STREAM_URL")
+        stream = requests.get(stream_url, verify=False, stream=True, timeout=5)
+        bytes_data = b""
+        prev_time = time.perf_counter()
+        fps = 0.0
 
-    # Discard any incomplete trailing data before the first JPEG start marker
-    if start != -1 and end != -1 and end < start:
-        bytes_data = bytes_data[start:]
-        continue
+        for chunk in stream.iter_content(chunk_size=16384):
+            if not run_stream:
+                break
 
-    if start != -1 and end != -1 and end > start:
-        jpg = bytes_data[start : end + 2]
-        bytes_data = bytes_data[end + 2 :]
+            bytes_data += chunk
+            start = bytes_data.find(b"\xff\xd8")
+            end = bytes_data.find(b"\xff\xd9")
 
-        if len(jpg) > 0:
-            frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            
-            if frame is not None:
-                curr_time = time.perf_counter()
-                time_diff = curr_time - prev_time
-                
-                if time_diff > 0:
-                    instant_fps = 1.0 /time_diff
-                    fps = instant_fps if fps == 0.0 else (0.9 * fps) + (0.1 * instant_fps)
-                prev_time = curr_time
-                
-                resized_frame = cv2.resize(frame,(0,0), fx=0.5, fy=0.5)
-                
-                # Run YOLO object detection and draw boxes
-                results = model(resized_frame, conf=0.25, verbose=False)
-                result = cast(Results, next(iter(results)))
-                annotated_frame = result.plot()
-                
-                og_height, og_width, _ = annotated_frame.shape
+            if start != -1 and end != -1 and end < start:
+                bytes_data = bytes_data[start:]
+                continue
 
-                # Live timestamp instead of the one frozen at startup
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                info_text = f"{now_str} | IP Camera | {og_width}x{og_height} | FPS: {fps:.1f}"
-                cv2.putText(annotated_frame, info_text, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            if start != -1 and end != -1 and end > start:
+                jpg = bytes_data[start : end + 2]
+                bytes_data = bytes_data[end + 2 :]
 
-                if recording and video_writer is not None:
-                    # Draw the REC indicator first so it ends up in the saved video too
-                    cv2.circle(annotated_frame, (og_width - 25, 25), 8, (0, 0, 255), -1)
-                    cv2.putText(annotated_frame, "REC", (og_width - 75, 31),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-                    video_writer.write(annotated_frame)
+                if len(jpg) > 0:
+                    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
 
-                cv2.imshow("Live Camera Feed", annotated_frame)
+                    if frame is not None:
+                        # Calculate smoothed FPS
+                        curr_time = time.perf_counter()
+                        time_diff = curr_time - prev_time
+                        if time_diff > 0:
+                            instant_fps = 1.0 / time_diff
+                            fps = instant_fps if fps == 0.0 else (0.9 * fps) + (0.1 * instant_fps)
+                        prev_time = curr_time
 
-                # Press 'q' to quit
-                key = cv2.waitKey(1) & 0XFF
-                
-                if key == ord("r"):
-                    if not recording:
-                        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                        rec_fps = max(1.0, round(fps)) if fps > 0 else 20.0
-                        fourcc = getattr(cv2, "VideoWriter_fourcc")(*"mp4v")
-                        rec_path = rec_dir / f"video_{ts}.mp4"
-                        video_writer = cv2.VideoWriter(str(rec_path), fourcc, rec_fps, (og_width, og_height))
-                        recording = True
-                        print(f"Started recording: {rec_path.resolve()}")
-                    else:
-                        recording = False
-                        if video_writer is not None:
-                            video_writer.release()
-                        video_writer = None 
-                        print("Stopped recording.")
-                        
-                
-                if key == ord("s"):
-                    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    filename = f"screenshot_{ts}.jpg"
-                    filepath = save_dir / filename
-                    cv2.imwrite(str(filepath), annotated_frame)
-                    print(f"Saved: {filepath.resolve()}")
-                    
-                elif key == ord("q"):
-                    break
+                        # Resize frame
+                        resized_frame = cv2.resize(frame, (0, 0), fx=scale_factor, fy=scale_factor)
+                        h, w, _ = resized_frame.shape
 
-cv2.destroyAllWindows()
+                        # Run YOLO detection (note results[0].plot())
+                        results = model(resized_frame, conf=conf_threshold, verbose=False)
+                        result = cast(Results, next(iter(results)))
+                        annotated_frame = result.plot()
+
+                        # Draw timestamp, resolution, and FPS overlay
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        overlay_text = f"{timestamp} | {w}x{h} | FPS: {fps:.1f}"
+                        cv2.putText(
+                            annotated_frame,
+                            overlay_text,
+                            (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 0),
+                            2,
+                            cv2.LINE_AA,
+                        )
+
+                        # Handle Screenshot button
+                        if st.session_state.take_screenshot:
+                            filepath = save_dir / f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                            cv2.imwrite(str(filepath), annotated_frame)
+                            status_placeholder.toast(f"Saved: {filepath.name}")
+                            st.session_state.take_screenshot = False
+
+                        # Handle Recording toggle
+                        if st.session_state.recording:
+                            if st.session_state.video_writer is None:
+                                rec_fps = max(1.0, round(fps)) if fps > 0 else 15.0
+                                fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
+                                rec_path = rec_dir / f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                                st.session_state.video_writer = cv2.VideoWriter(
+                                    str(rec_path), fourcc, rec_fps, (w, h)
+                                )
+                            st.session_state.video_writer.write(annotated_frame)
+                            cv2.circle(annotated_frame, (w - 25, 25), 8, (0, 0, 255), -1)
+                            cv2.putText(
+                                annotated_frame,
+                                "REC",
+                                (w - 75, 31),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (0, 0, 255),
+                                2,
+                                cv2.LINE_AA,
+                            )
+
+                        # Convert BGR to RGB and render in Streamlit
+                        rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                        frame_placeholder.image(rgb_frame, channels="RGB", use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Stream connection error: {e}")
+else:
+    if st.session_state.video_writer is not None:
+        st.session_state.video_writer.release()
+        st.session_state.video_writer = None
+        st.session_state.recording = False
+    st.info("Toggle **Start Camera Feed** in the sidebar to begin streaming.")
 
 # stream_url = "https://192.168.100.7:8080/video"
 
